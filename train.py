@@ -579,21 +579,47 @@ def accuracy(query_features, reference_features, query_labels, topk=[1,5,10]):
                 if ranking < k:
                     results[j] += 1.
     else:
-        # split the queries if the matrix is too large, e.g. VIGOR
-        assert N % 4 == 0
-        N_4 = N // 4
-        for split in range(4):
-            query_features_i = query_features[(split*N_4):((split+1)*N_4), :]
-            query_labels_i = query_labels[(split*N_4):((split+1)*N_4)]
-            query_features_norm = np.sqrt(np.sum(query_features_i ** 2, axis=1, keepdims=True))
-            reference_features_norm = np.sqrt(np.sum(reference_features ** 2, axis=1, keepdims=True))
+       assert len(query_features) == len(query_labels)
+
+    N = len(query_features)
+    M = len(reference_features)
+    query_batch_size = 1000
+    reference_batch_size = 5000
+
+    results = [0] * len(topk)
+    num_splits = 16
+    split_size = N // num_splits
+
+    for split in range(num_splits):
+        query_start = split * split_size
+        query_end = (split + 1) * split_size if split < num_splits - 1 else N
+        query_features_i = query_features[query_start:query_end, :]
+        query_labels_i = query_labels[query_start:query_end]
+        
+        query_features_norm = np.linalg.norm(query_features_i, axis=1, keepdims=True)
+        query_features_norm[query_features_norm == 0] = 1  # 防止除以零
+        
+        all_similarities = np.zeros((query_end - query_start, M))
+
+        for reference_start in range(0, M, reference_batch_size):
+            reference_end = min(reference_start + reference_batch_size, M)
+            reference_features_batch = reference_features[reference_start:reference_end, :]
+
+            reference_features_norm = np.linalg.norm(reference_features_batch, axis=1, keepdims=True)
+            reference_features_norm[reference_features_norm == 0] = 1  # 防止除以零
+            
             similarity = np.matmul(query_features_i / query_features_norm,
-                                   (reference_features / reference_features_norm).transpose())
-            for i in range(query_features_i.shape[0]):
-                ranking = np.sum((similarity[i, :] > similarity[i, query_labels_i[i]])*1.)
-                for j, k in enumerate(topk):
-                    if ranking < k:
-                        results[j] += 1.
+                                   (reference_features_batch / reference_features_norm).T)
+
+            all_similarities[:, reference_start:reference_end] = similarity
+
+        # 计算最终结果
+        for i in range(query_end - query_start):
+            ranking = np.argsort(-all_similarities[i, :])  # 降序排序
+            true_label_index = np.where(ranking == query_labels_i[i])[0][0]
+            for j, k in enumerate(topk):
+                if true_label_index < k:
+                    results[j] += 1.
 
     results = results/ query_features.shape[0] * 100.
     print('Percentage-top1:{}, top5:{}, top10:{}, top1%:{}, time:{}'.format(results[0], results[1], results[2], results[-1], time.time() - ts))
